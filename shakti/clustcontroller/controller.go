@@ -516,7 +516,7 @@ func (c *clientClusterManager) executeRaftOpWithRetry(f func() (interface{}, err
 			!errors.Is(err, dragonboat.ErrClusterNotFound) && !errors.Is(err, dragonboat.ErrClusterClosed) &&
 			!errors.Is(err, dragonboat.ErrClusterNotInitialized) && !errors.Is(err, dragonboat.ErrClusterNotBootstrapped) &&
 			!errors.Is(err, dragonboat.ErrSystemBusy) && !errors.Is(err, dragonboat.ErrInvalidDeadline) &&
-			!errors.Is(err, dragonboat.ErrClosed) {
+			!errors.Is(err, dragonboat.ErrClosed) && !errors.Is(err, dragonboat.ErrRejected) {
 			return nil, errors.WithStack(err)
 		}
 		if time.Now().Sub(start) >= timeout {

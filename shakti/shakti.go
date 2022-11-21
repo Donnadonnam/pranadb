@@ -1,6 +1,7 @@
 package shakti
 
 import (
+	"github.com/andy-kimball/arenaskl"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 	"github.com/squareup/pranadb/common"
@@ -16,11 +17,12 @@ import (
 )
 
 type Shakti struct {
-	id            int64
+	dbID          uint64
 	startStopLock sync.Mutex
 	started       bool
 	conf          cmn.Conf
 	memtable      *mem.Memtable
+	arena         *arenaskl.Arena
 	cloudStore    cloudstore.Store
 	controller    datacontroller.Controller
 	TableCache    *sst.Cache
@@ -29,18 +31,21 @@ type Shakti struct {
 	mtFlushQueue  []mtFlushEntry
 	// We use a separate lock to protect the flush queue as we don't want removing first element from queue to block
 	// writes to the memtable
-	mtFlushQueueLock common.SpinLock
-	iterators        map[*shaktiIterator]struct{}
-	mtReplaceTimer   *time.Timer
-	mtLastReplace    uint64
-	mtMaxReplaceTime uint64
+	mtFlushQueueLock            common.SpinLock
+	iterators                   map[*shaktiIterator]struct{}
+	mtReplaceTimer              *time.Timer
+	mtLastReplace               uint64
+	mtMaxReplaceTime            uint64
+	lastCommittedBatchSequences sync.Map
 }
 
-func NewShakti(id int64, store cloudstore.Store, registry datacontroller.Controller, conf cmn.Conf) *Shakti {
-	memtable := mem.NewMemtable(conf.MemtableMaxSizeBytes)
+func NewShakti(dbID uint64, store cloudstore.Store, registry datacontroller.Controller, conf cmn.Conf) *Shakti {
+	arena := arenaskl.NewArena(uint32(conf.MemtableMaxSizeBytes))
+	memtable := mem.NewMemtable(arena)
 	return &Shakti{
-		id:               id,
+		dbID:             dbID,
 		conf:             conf,
+		arena:            arena,
 		memtable:         memtable,
 		cloudStore:       store,
 		controller:       registry,
@@ -72,8 +77,35 @@ func (s *Shakti) Stop() error {
 	return nil
 }
 
-func (s *Shakti) Write(batch *mem.Batch) error {
+func NewWriteBatch(processorID uint64, sequenceNum int64, batch *mem.Batch, committedCallback func() error) *WriteBatch {
+	return &WriteBatch{
+		processorID:       processorID,
+		sequenceNum:       sequenceNum,
+		batch:             batch,
+		committedCallback: committedCallback,
+	}
+}
+
+type WriteBatch struct {
+	processorID       uint64
+	sequenceNum       int64
+	batch             *mem.Batch
+	committedCallback func() error
+}
+
+func (wb *WriteBatch) committed() {
+	wb.committedCallback()
+}
+
+func (s *Shakti) Write(batch *WriteBatch) error {
 	for {
+		ok := s.checkDedupCache(batch)
+		if !ok {
+			// We have seen this batch before - ignore - this can happen on recovery after failure
+			return nil
+		}
+		// Add dedup entry to batch
+		s.putDedupEntry(batch)
 		memtable, ok, err := s.doWrite(batch)
 		if err != nil {
 			return err
@@ -81,12 +113,67 @@ func (s *Shakti) Write(batch *mem.Batch) error {
 		if ok {
 			return nil
 		}
-
 		// No more space left in memtable - swap writeIter out and replace writeIter with a new one and flush writeIter async
 		if err := s.replaceMemtable(memtable); err != nil {
 			return err
 		}
 	}
+}
+
+func (s *Shakti) putDedupEntry(batch *WriteBatch) {
+	// We add a row in the batch recording the sequence number of the batch
+	key := s.createDedupKey(batch.processorID)
+	value := common.AppendUint64ToBufferLE(nil, uint64(batch.sequenceNum))
+	// TODO: Note that putting this key in the batch will mean the common prefix for the batch will probably be just
+	// app_id possibly making the batch encoded size largerl but maybe nothing to worry about
+	batch.batch.AddEntry(cmn.KV{
+		Key:   key,
+		Value: value,
+	})
+}
+
+func (s *Shakti) createDedupKey(processorID uint64) []byte {
+	key := cmn.EncodeKeyPrefix(nil, s.dbID, cmn.SystemTableDedupID, 0)
+	key = common.AppendUint64ToBufferBE(key, uint64(processorID))
+	return key
+}
+
+func (s *Shakti) LoadLastBatchSequence(processorID uint64) error {
+	rangeStart := s.createDedupKey(processorID)
+
+	rangeEnd := common.IncrementBytesBigEndian(rangeStart)
+	iter, err := s.NewIterator(rangeStart, rangeEnd)
+	if err != nil {
+		return err
+	}
+	valid, err := iter.IsValid()
+	if err != nil {
+		return err
+	}
+	if valid {
+		kv := iter.Current()
+		lastSequence, _ := common.ReadUint64FromBufferLE(kv.Value, 0)
+		s.lastCommittedBatchSequences.Store(processorID, int64(lastSequence))
+	}
+	return nil
+}
+
+func (s *Shakti) checkDedupCache(batch *WriteBatch) bool {
+	if batch.sequenceNum == -1 {
+		// -1 means don't check sequence number - used only in testing
+		return true
+	}
+	// We check whether we have seen the sequence number from the same processor before
+	o, ok := s.lastCommittedBatchSequences.Load(batch.processorID)
+	if ok {
+		lastSeq := o.(int64) //nolint:forcetypeassert
+		if batch.sequenceNum <= lastSeq {
+			// Duplicate batch - we will ignore it
+			return false
+		}
+	}
+	s.lastCommittedBatchSequences.Store(batch.processorID, batch.sequenceNum)
+	return true
 }
 
 // Used in testing only
@@ -119,7 +206,8 @@ func (s *Shakti) replaceMemtable0(memtable *mem.Memtable) error {
 		*/
 
 		// It hasn't already been swapped so swap it
-		s.memtable = mem.NewMemtable(s.conf.MemtableMaxSizeBytes)
+		s.arena.Reset()
+		s.memtable = mem.NewMemtable(s.arena)
 
 		if err := s.updateIterators(s.memtable); err != nil {
 			return err
@@ -150,11 +238,11 @@ func (s *Shakti) updateIterators(mt *mem.Memtable) error {
 	return nil
 }
 
-func (s *Shakti) doWrite(batch *mem.Batch) (*mem.Memtable, bool, error) {
+func (s *Shakti) doWrite(batch *WriteBatch) (*mem.Memtable, bool, error) {
 	s.mtLock.RLock()
 	defer s.mtLock.RUnlock()
 	mt := s.memtable
-	ok, err := mt.Write(batch)
+	ok, err := mt.Write(batch.batch, batch.committedCallback)
 	return mt, ok, err
 }
 
@@ -310,6 +398,9 @@ func (s *Shakti) mtFlushRunLoop() {
 			}); err != nil {
 				log.Errorf("failed to register sstable %+v", err)
 				return
+			}
+			if err := fe.memtable.Committed(); err != nil {
+				log.Errorf("failed to call memtable callback %+v", err)
 			}
 			fe.memtable = nil
 			fe.ssTabInfo.Store(nil)

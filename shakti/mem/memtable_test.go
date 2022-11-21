@@ -2,15 +2,30 @@ package mem
 
 import (
 	"fmt"
+	"github.com/andy-kimball/arenaskl"
+	log "github.com/sirupsen/logrus"
 	"github.com/squareup/pranadb/errors"
+	pranalog "github.com/squareup/pranadb/log"
+	"github.com/squareup/pranadb/shakti/cmn"
 	"github.com/squareup/pranadb/shakti/iteration"
 	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
 )
 
+func init() {
+	log.SetFormatter(&log.TextFormatter{
+		ForceColors:            true,
+		DisableQuote:           true,
+		FullTimestamp:          true,
+		DisableLevelTruncation: true,
+		TimestampFormat:        pranalog.TimestampFormat,
+	})
+	log.SetLevel(log.TraceLevel)
+}
+
 func TestMTIteratorPicksUpNewRecords(t *testing.T) {
-	memTable := NewMemtable(1024 * 1024)
+	memTable := NewMemtable(arenaskl.NewArena(1024 * 1024))
 
 	iter := memTable.NewIterator(nil, nil)
 	requireIterValid(t, iter, false)
@@ -49,7 +64,7 @@ func TestMTIteratorPicksUpNewRecords(t *testing.T) {
 }
 
 func TestMTIteratorAddNonKeyOrder(t *testing.T) {
-	memTable := NewMemtable(1024 * 1024)
+	memTable := NewMemtable(arenaskl.NewArena(1024 * 1024))
 
 	addToMemtable(t, memTable, "key0", "val0")
 	addToMemtable(t, memTable, "key1", "val1")
@@ -70,7 +85,7 @@ func TestMTIteratorAddNonKeyOrder(t *testing.T) {
 }
 
 func TestMTIteratorAddInNonKeyOrder(t *testing.T) {
-	memTable := NewMemtable(1024 * 1024)
+	memTable := NewMemtable(arenaskl.NewArena(1024 * 1024))
 
 	addToMemtable(t, memTable, "key3", "val3")
 	addToMemtable(t, memTable, "key2", "val2")
@@ -91,7 +106,7 @@ func TestMTIteratorAddInNonKeyOrder(t *testing.T) {
 }
 
 func TestMTIteratorOverwriteKeys(t *testing.T) {
-	memTable := NewMemtable(1024 * 1024)
+	memTable := NewMemtable(arenaskl.NewArena(1024 * 1024))
 
 	addToMemtable(t, memTable, "key3", "val3")
 	addToMemtable(t, memTable, "key2", "val2")
@@ -120,7 +135,7 @@ func TestMTIteratorOverwriteKeys(t *testing.T) {
 }
 
 func TestMTIteratorTombstones(t *testing.T) {
-	memTable := NewMemtable(1024 * 1024)
+	memTable := NewMemtable(arenaskl.NewArena(1024 * 1024))
 
 	addToMemtable(t, memTable, "key3", "val3")
 	addToMemtable(t, memTable, "key2", "val2")
@@ -145,7 +160,7 @@ func TestMTIteratorTombstones(t *testing.T) {
 }
 
 func TestMTIteratorMultipleIterators(t *testing.T) {
-	memTable := NewMemtable(1024 * 1024)
+	memTable := NewMemtable(arenaskl.NewArena(1024 * 1024))
 
 	numEntries := 1000
 
@@ -224,17 +239,20 @@ func TestMTIteratorIterateInRange(t *testing.T) {
 
 func testMTIteratorIterateInRange(t *testing.T, keyStart []byte, keyEnd []byte, expectedFirst int, expectedLast int) {
 	t.Helper()
-	memTable := NewMemtable(1024 * 1024)
+	memTable := NewMemtable(arenaskl.NewArena(1024 * 1024))
 	numEntries := 100
-	batch := &Batch{
-		KVs: make(map[string][]byte),
-	}
+	batch := NewBatch()
 	for i := 0; i < numEntries; i++ {
-		key := fmt.Sprintf("prefix/key%010d", i)
+		key := []byte(fmt.Sprintf("prefix/key%010d", i))
 		val := []byte(fmt.Sprintf("val%010d", i))
-		batch.KVs[key] = val
+		batch.AddEntry(cmn.KV{
+			Key:   key,
+			Value: val,
+		})
 	}
-	ok, err := memTable.Write(batch)
+	ok, err := memTable.Write(batch, func() error {
+		return nil
+	})
 	require.NoError(t, err)
 	require.True(t, ok)
 
@@ -252,24 +270,28 @@ func testMTIteratorIterateInRange(t *testing.T, keyStart []byte, keyEnd []byte, 
 
 func addToMemtable(t *testing.T, memTable *Memtable, key string, value string) {
 	t.Helper()
-	kvs := make(map[string][]byte)
-	kvs[key] = []byte(value)
-	batch := &Batch{
-		KVs: kvs,
-	}
-	ok, err := memTable.Write(batch)
+	batch := NewBatch()
+	batch.AddEntry(cmn.KV{
+		Key:   []byte(key),
+		Value: []byte(value),
+	})
+	ok, err := memTable.Write(batch, func() error {
+		return nil
+	})
 	require.NoError(t, err)
 	require.True(t, ok)
 }
 
 func addToMemtableWithByteSlice(t *testing.T, memTable *Memtable, key string, value []byte) {
 	t.Helper()
-	kvs := make(map[string][]byte)
-	kvs[key] = value
-	batch := &Batch{
-		KVs: kvs,
-	}
-	ok, err := memTable.Write(batch)
+	batch := NewBatch()
+	batch.AddEntry(cmn.KV{
+		Key:   []byte(key),
+		Value: value,
+	})
+	ok, err := memTable.Write(batch, func() error {
+		return nil
+	})
 	require.NoError(t, err)
 	require.True(t, ok)
 }
@@ -283,6 +305,58 @@ func TestCommonPrefix(t *testing.T) {
 	testCommonPrefix(t, "otherprefix", "someprefix", 0)
 	testCommonPrefix(t, "", "someprefix", 0)
 	testCommonPrefix(t, "someprefix", "", 0)
+}
+
+func TestEntryMemOverhead(t *testing.T) {
+	init, avg := calcEntryMemOverhead()
+	require.True(t, init > 0 && init < 500)
+	require.True(t, avg > 0 && avg < 40)
+}
+
+func TestBatchAddAndIterate(t *testing.T) {
+	batch := NewBatch()
+	require.Equal(t, 0, batch.Size())
+	// Add them in reverse order to make sure insertion order is maintained
+	for i := 9; i >= 0; i-- {
+		key := []byte(fmt.Sprintf("prefix/key%010d", i))
+		val := []byte(fmt.Sprintf("val%010d", i))
+		batch.AddEntry(cmn.KV{
+			Key:   key,
+			Value: val,
+		})
+		require.Equal(t, 10-i, batch.Size())
+	}
+	j := 9
+	for _, entry := range batch.entries {
+		require.Equal(t, fmt.Sprintf("prefix/key%010d", j), string(entry.Key))
+		require.Equal(t, fmt.Sprintf("val%010d", j), string(entry.Value))
+		j--
+	}
+}
+
+func TestBatchSerializeDeserialize(t *testing.T) {
+	batch := NewBatch()
+	require.Equal(t, 0, batch.Size())
+	for i := 0; i < 10; i++ {
+		key := []byte(fmt.Sprintf("prefix/key%010d", i))
+		val := []byte(fmt.Sprintf("val%010d", i))
+		batch.AddEntry(cmn.KV{
+			Key:   key,
+			Value: val,
+		})
+		require.Equal(t, i+1, batch.Size())
+	}
+	totKkSize := batch.totKVSize
+	buff := []byte("foo")
+	buff = batch.Serialize(buff)
+	batch2 := NewBatch()
+	require.Equal(t, "foo", string(buff[:3]))
+	batch2.Deserialize(buff[3:], 0)
+	for i, entry := range batch.entries {
+		require.Equal(t, fmt.Sprintf("prefix/key%010d", i), string(entry.Key))
+		require.Equal(t, fmt.Sprintf("val%010d", i), string(entry.Value))
+	}
+	require.Equal(t, totKkSize, batch2.totKVSize)
 }
 
 func testCommonPrefix(t *testing.T, prefix1 string, prefix2 string, expected int) {

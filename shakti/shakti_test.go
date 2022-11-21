@@ -244,11 +244,16 @@ func TestIterateShuffledKeys(t *testing.T) {
 	var batch *mem.Batch
 	for _, entry := range entries {
 		if batch == nil {
-			batch = &mem.Batch{KVs: map[string][]byte{}}
+			batch = mem.NewBatch()
 		}
-		batch.KVs[string(entry.keyStart)] = entry.keyEnd
-		if len(batch.KVs) == batchSize {
-			err := shakti.Write(batch)
+		batch.AddEntry(cmn.KV{
+			Key:   entry.keyEnd,
+			Value: entry.keyEnd,
+		})
+		if batch.Size() == batchSize {
+			rBatch := NewWriteBatch(1, -1, batch, func() {
+			})
+			err := shakti.Write(rBatch)
 			require.NoError(t, err)
 			batch = nil
 			err = shakti.forceReplaceMemtable()
@@ -395,21 +400,21 @@ func writeKVsWithValueSuffix(t *testing.T, shakti *Shakti, keyStart int, numPair
 
 func writeKVsWithParams(t *testing.T, shakti *Shakti, keyStart int, numPairs int, valueSuffix string, tombstones bool) {
 	t.Helper()
-	kvs := make(map[string][]byte, numPairs)
+	batch := mem.NewBatch()
 	for i := 0; i < numPairs; i++ {
-		k := fmt.Sprintf("prefix/key-%010d", keyStart+i)
+		k := []byte(fmt.Sprintf("prefix/key-%010d", keyStart+i))
 		var v []byte
 		if tombstones {
 			v = nil
 		} else {
 			v = []byte(fmt.Sprintf("prefix/value-%010d%s", keyStart+i, valueSuffix))
 		}
-		kvs[k] = v
+		batch.AddEntry(cmn.KV{
+			Key:   k,
+			Value: v,
+		})
 	}
-	batch := &mem.Batch{
-		KVs: kvs,
-	}
-	err := shakti.Write(batch)
+	err := shakti.Write(NewWriteBatch(1, -1, batch, func() {}))
 	require.NoError(t, err)
 }
 
