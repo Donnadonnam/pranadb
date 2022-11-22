@@ -1,6 +1,9 @@
 package proc
 
-import "github.com/squareup/pranadb/errors"
+import (
+	"github.com/squareup/pranadb/errors"
+	"sync"
+)
 
 type Replicator interface {
 	ReplicateMessage(processorID uint64, message *replicateMessage) error
@@ -8,14 +11,15 @@ type Replicator interface {
 
 // LocalReplicator is used in testing
 type LocalReplicator struct {
-	processors map[uint64]*Processor
+	processors sync.Map
 }
 
 func (lr *LocalReplicator) ReplicateMessage(processorID uint64, message *replicateMessage) error {
-	processor, ok := lr.processors[processorID]
+	p, ok := lr.processors.Load(processorID)
 	if !ok {
 		return errors.Errorf("cannot find processor %d", processorID)
 	}
+	processor := p.(*Processor) //nolint:forcetypeassert
 	if message.batch != nil {
 		// It's a batch to replicate
 		bytes := message.batch.Serialize(nil)
@@ -31,5 +35,5 @@ func (lr *LocalReplicator) ReplicateMessage(processorID uint64, message *replica
 			return err
 		}
 	}
-	return message.completeCallback()
+	return message.completionFunc()
 }

@@ -37,6 +37,7 @@ type Shakti struct {
 	mtLastReplace               uint64
 	mtMaxReplaceTime            uint64
 	lastCommittedBatchSequences sync.Map
+	stopWg                      sync.WaitGroup
 }
 
 func NewShakti(dbID uint64, store cloudstore.Store, registry datacontroller.Controller, conf cmn.Conf) *Shakti {
@@ -60,6 +61,7 @@ func (s *Shakti) Start() error {
 	s.startStopLock.Lock()
 	defer s.startStopLock.Unlock()
 	s.started = true
+	s.stopWg.Add(1)
 	go s.mtFlushRunLoop()
 	s.scheduleMtReplace()
 	return nil
@@ -74,28 +76,29 @@ func (s *Shakti) Stop() error {
 		s.mtReplaceTimer = nil
 	}
 	close(s.mtFlushChan)
+	s.stopWg.Wait()
 	return nil
 }
 
-func NewWriteBatch(processorID uint64, sequenceNum int64, batch *mem.Batch, committedCallback func() error) *WriteBatch {
+func NewWriteBatch(processorID uint64, sequenceNum int64, batch *mem.Batch, completionFunc func(error) error) *WriteBatch {
 	return &WriteBatch{
-		processorID:       processorID,
-		sequenceNum:       sequenceNum,
-		batch:             batch,
-		committedCallback: committedCallback,
+		ProcessorID:    processorID,
+		SequenceNum:    sequenceNum,
+		Batch:          batch,
+		CompletionFunc: completionFunc,
 	}
 }
 
 type WriteBatch struct {
-	processorID       uint64
-	sequenceNum       int64
-	batch             *mem.Batch
-	committedCallback func() error
+	ProcessorID    uint64
+	SequenceNum    int64
+	Batch          *mem.Batch
+	CompletionFunc func(error) error
 }
 
-func (wb *WriteBatch) committed() {
-	wb.committedCallback()
-}
+//func (wb *WriteBatch) committed() {
+//	wb.CompletionFunc()
+//}
 
 func (s *Shakti) Write(batch *WriteBatch) error {
 	for {
@@ -121,12 +124,15 @@ func (s *Shakti) Write(batch *WriteBatch) error {
 }
 
 func (s *Shakti) putDedupEntry(batch *WriteBatch) {
+	if s.conf.DisableBatchSequenceInsertion {
+		return
+	}
 	// We add a row in the batch recording the sequence number of the batch
-	key := s.createDedupKey(batch.processorID)
-	value := common.AppendUint64ToBufferLE(nil, uint64(batch.sequenceNum))
+	key := s.createDedupKey(batch.ProcessorID)
+	value := common.AppendUint64ToBufferLE(nil, uint64(batch.SequenceNum))
 	// TODO: Note that putting this key in the batch will mean the common prefix for the batch will probably be just
 	// app_id possibly making the batch encoded size largerl but maybe nothing to worry about
-	batch.batch.AddEntry(cmn.KV{
+	batch.Batch.AddEntry(cmn.KV{
 		Key:   key,
 		Value: value,
 	})
@@ -159,20 +165,20 @@ func (s *Shakti) LoadLastBatchSequence(processorID uint64) error {
 }
 
 func (s *Shakti) checkDedupCache(batch *WriteBatch) bool {
-	if batch.sequenceNum == -1 {
+	if batch.SequenceNum == -1 {
 		// -1 means don't check sequence number - used only in testing
 		return true
 	}
 	// We check whether we have seen the sequence number from the same processor before
-	o, ok := s.lastCommittedBatchSequences.Load(batch.processorID)
+	o, ok := s.lastCommittedBatchSequences.Load(batch.ProcessorID)
 	if ok {
 		lastSeq := o.(int64) //nolint:forcetypeassert
-		if batch.sequenceNum <= lastSeq {
+		if batch.SequenceNum <= lastSeq {
 			// Duplicate batch - we will ignore it
 			return false
 		}
 	}
-	s.lastCommittedBatchSequences.Store(batch.processorID, batch.sequenceNum)
+	s.lastCommittedBatchSequences.Store(batch.ProcessorID, batch.SequenceNum)
 	return true
 }
 
@@ -205,8 +211,9 @@ func (s *Shakti) replaceMemtable0(memtable *mem.Memtable) error {
 			e.g. +- 5% if the SSTable size is far from the ideal size
 		*/
 
-		// It hasn't already been swapped so swap it
-		s.arena.Reset()
+		// TODO once a memtable has been fully flushed and removed from the flush queue and there are no more iterators
+		// on it, we can reuse the arena o avoid creating new ones each time (i.e. create an arena pool)
+		s.arena = arenaskl.NewArena(uint32(s.conf.MemtableMaxSizeBytes))
 		s.memtable = mem.NewMemtable(s.arena)
 
 		if err := s.updateIterators(s.memtable); err != nil {
@@ -242,7 +249,7 @@ func (s *Shakti) doWrite(batch *WriteBatch) (*mem.Memtable, bool, error) {
 	s.mtLock.RLock()
 	defer s.mtLock.RUnlock()
 	mt := s.memtable
-	ok, err := mt.Write(batch.batch, batch.committedCallback)
+	ok, err := mt.Write(batch.Batch, batch.CompletionFunc)
 	return mt, ok, err
 }
 
@@ -403,7 +410,6 @@ func (s *Shakti) mtFlushRunLoop() {
 				log.Errorf("failed to call memtable callback %+v", err)
 			}
 			fe.memtable = nil
-			fe.ssTabInfo.Store(nil)
 		}
 		if i > 0 {
 			nl := len(s.mtFlushQueue) - i
@@ -435,6 +441,7 @@ func (s *Shakti) mtFlushRunLoop() {
 			bufEstimates.updateSizeEstimates(buffSize, entries)
 		}()
 	}
+	s.stopWg.Done()
 }
 
 // Flush the memtable to a sstable, and push writeIter to cloud storage, this method does not register the sstable with

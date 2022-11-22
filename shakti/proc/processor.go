@@ -69,13 +69,18 @@ func (p *Processor) maybeRecover() error {
 	// Process any replicated batches that weren't fully committed, however they could already have been stored or
 	// replicated, in this case they will be rejected by duplicate detection in storage and when forwarding to other
 	// processors again
+	var theErr atomic.Value
 	if len(p.replicatedBatches) > 0 {
 		wg := sync.WaitGroup{}
 		wg.Add(len(p.replicatedBatches))
 		for _, batch := range p.replicatedBatches {
 			memBatch := mem.NewBatch()
 			memBatch.Deserialize(batch.buff, 0)
-			if err := p.processBatch(batch.sequenceNum, memBatch, func() error {
+			if err := p.processBatch(batch.sequenceNum, memBatch, func(err error) error {
+				if err != nil {
+					theErr.Store(err)
+					log.Errorf("failed to process recovery batch %+v", err)
+				}
 				wg.Done()
 				return nil
 			}); err != nil {
@@ -83,6 +88,10 @@ func (p *Processor) maybeRecover() error {
 			}
 		}
 		wg.Wait()
+	}
+	err := theErr.Load()
+	if err != nil {
+		return err.(error)
 	}
 	return nil
 }
@@ -100,11 +109,16 @@ func (p *Processor) Stop() error {
 	return nil
 }
 
-func (p *Processor) RequestEnqueue(sequenceNum int64, batch *mem.Batch) error {
+// RequestEnqueue is called to enqueue a batch for processing. It will return immediately and the completion function
+// will called asynchronously when the batch has been successfully enqueued or an error occurred
+func (p *Processor) RequestEnqueue(sequenceNum int64, batch *mem.Batch, completionFunc func(err error) error) error {
 	// First we must replicate the batch, when that is complete we will actually queue the batch
-	return p.replicator.ReplicateMessage(p.id, newReplicateMessage(sequenceNum, batch, func() error {
+	return p.replicator.ReplicateMessage(p.id, newReplicateMessage(sequenceNum, batch, func(err error) error {
+		if err != nil {
+			return completionFunc(err)
+		}
 		p.enqueue(batch)
-		return nil
+		return completionFunc(nil)
 	}))
 }
 
@@ -132,16 +146,26 @@ func (p *Processor) loop() error {
 		p.queueLock.Unlock()
 		p.headPos++
 		sequenceNumber := p.batchSequence
-		if err := p.processBatch(p.batchSequence, batch, func() error {
-			return p.batchCommitted(sequenceNumber)
+		var theErr atomic.Value
+		if err := p.processBatch(p.batchSequence, batch, func(err error) error {
+			if err != nil {
+				theErr.Store(err)
+				return nil
+			} else {
+				return p.batchCommitted(sequenceNumber)
+			}
 		}); err != nil {
 			return err
+		}
+		err := theErr.Load()
+		if err != nil {
+			return err.(error)
 		}
 		p.batchSequence++
 	}
 }
 
-func (p *Processor) processBatch(sequenceNumber int64, batch *mem.Batch, completionFunc func() error) error {
+func (p *Processor) processBatch(sequenceNumber int64, batch *mem.Batch, completionFunc func(error) error) error {
 	// Send the bath to be processed by the DAG(s)
 	localBatch, remoteBatches, err := p.batchHander.HandleBatch(batch)
 	if err != nil {
@@ -170,7 +194,7 @@ func (p *Processor) processBatch(sequenceNumber int64, batch *mem.Batch, complet
 	return nil
 }
 
-func newCountDownFuture(sequenceNum int64, completionFunc func() error) *countDownFuture {
+func newCountDownFuture(sequenceNum int64, completionFunc func(error) error) *countDownFuture {
 	return &countDownFuture{
 		sequenceNum:    sequenceNum,
 		completionFunc: completionFunc,
@@ -181,12 +205,15 @@ func newCountDownFuture(sequenceNum int64, completionFunc func() error) *countDo
 type countDownFuture struct {
 	sequenceNum    int64
 	count          int32
-	completionFunc func() error
+	completionFunc func(error) error
 }
 
-func (pf *countDownFuture) countDown() error {
+func (pf *countDownFuture) countDown(err error) error {
+	if err != nil {
+		return pf.completionFunc(err)
+	}
 	if atomic.AddInt32(&pf.count, -1) == 0 {
-		if err := pf.completionFunc(); err != nil {
+		if err := pf.completionFunc(nil); err != nil {
 			return err
 		}
 	}
@@ -197,7 +224,11 @@ func (p *Processor) batchCommitted(sequenceNum int64) error {
 	// A batch has been processed and committed on this node and also enqueued with any remote processors that the
 	// DAG(s) decided to forward batches to
 	// So now we must replicate the remove from the queue, and then we can remove the entry from the local queue.
-	message := newReplicateMessage(sequenceNum, nil, func() error {
+	message := newReplicateMessage(sequenceNum, nil, func(err error) error {
+		if err != nil {
+			log.Errorf("failed to replicate batch %+v", err)
+			return nil
+		}
 		return p.dequeue(sequenceNum)
 	})
 	return p.replicator.ReplicateMessage(p.id, message)
@@ -246,11 +277,11 @@ type BatchHandler interface {
 	HandleBatch(batch *mem.Batch) (*mem.Batch, map[uint64]*mem.Batch, error)
 }
 
-func newReplicateMessage(sequenceNum int64, batch *mem.Batch, completeCallback func() error) *replicateMessage {
+func newReplicateMessage(sequenceNum int64, batch *mem.Batch, completionFunc func(error) error) *replicateMessage {
 	return &replicateMessage{
-		sequenceNum:      sequenceNum,
-		batch:            batch,
-		completeCallback: completeCallback,
+		sequenceNum:    sequenceNum,
+		batch:          batch,
+		completionFunc: completionFunc,
 	}
 }
 
@@ -260,17 +291,13 @@ type replicatedBatch struct {
 }
 
 type replicateMessage struct {
-	sequenceNum      int64
-	batch            *mem.Batch
-	completeCallback func() error
+	sequenceNum    int64
+	batch          *mem.Batch
+	completionFunc func(error) error
 }
 
 func (r *replicateMessage) complete(err error) {
-	if err != nil {
-		log.Errorf("failed to replicate batch %+v", err)
-		return
-	}
-	if err := r.completeCallback(); err != nil {
+	if err := r.completionFunc(nil); err != nil {
 		log.Errorf("failed to replicate message %+v", err)
 	}
 }

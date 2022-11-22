@@ -18,13 +18,7 @@ import (
 /*
 TODO
 
-1. Add lots of random keys data such that it creates multiple sstables in cloud store, then iterate the whole lot
-2. Add lots of random keys data as fast as we can until it creates lots of sstables in cloud store and at same time, iterate
-through the whole lot and make sure all is received.
-3. Add some latency on cloud store and do above again, verify that memtable flush queue doesn't get too big
-4. Like 2 but multiple concurent iterators
-5. Instead of random keys, add lots of sequential data, with multiple iterators reading a prefix of that - similar to how
-Kafka consumers would work
+Test for batch sequence being inserted
 */
 
 func init() {
@@ -143,6 +137,7 @@ func TestIterateThenReplaceThenDelete(t *testing.T) {
 
 func TestIterateAllMemtableThenReplace(t *testing.T) {
 	shakti := setupShakti(t)
+	defer shakti.Stop()
 
 	iter, err := shakti.NewIterator(nil, nil)
 	require.NoError(t, err)
@@ -164,8 +159,15 @@ func TestIterateAllMemtableThenReplace(t *testing.T) {
 	}
 }
 
+func TestIterateSomeMemtableThenReplace2(t *testing.T) {
+	for i := 0; i < 1000; i++ {
+		TestIterateSomeMemtableThenReplace(t)
+	}
+}
+
 func TestIterateSomeMemtableThenReplace(t *testing.T) {
 	shakti := setupShakti(t)
+	defer stopShakti(t, shakti)
 
 	iter, err := shakti.NewIterator(nil, nil)
 	require.NoError(t, err)
@@ -251,7 +253,8 @@ func TestIterateShuffledKeys(t *testing.T) {
 			Value: entry.keyEnd,
 		})
 		if batch.Size() == batchSize {
-			rBatch := NewWriteBatch(1, -1, batch, func() {
+			rBatch := NewWriteBatch(1, -1, batch, func(error) error {
+				return nil
 			})
 			err := shakti.Write(rBatch)
 			require.NoError(t, err)
@@ -332,10 +335,11 @@ func TestMemtableReplaceWhenMaxSizeReached(t *testing.T) {
 func setupShakti(t *testing.T) *Shakti {
 	t.Helper()
 	conf := cmn.Conf{
-		MemtableMaxSizeBytes:      1024 * 1024,
-		MemtableFlushQueueMaxSize: 4,
-		TableFormat:               cmn.DataFormatV1,
-		MemTableMaxReplaceTime:    30 * time.Second,
+		MemtableMaxSizeBytes:          1024 * 1024,
+		MemtableFlushQueueMaxSize:     4,
+		TableFormat:                   cmn.DataFormatV1,
+		MemTableMaxReplaceTime:        30 * time.Second,
+		DisableBatchSequenceInsertion: true,
 	}
 	return setupShaktiWithConf(t, conf)
 }
@@ -359,6 +363,11 @@ func setupShaktiWithConf(t *testing.T, conf cmn.Conf) *Shakti {
 	err = controller.SetLeader()
 	require.NoError(t, err)
 	return shakti
+}
+
+func stopShakti(t *testing.T, shakti *Shakti) {
+	err := shakti.Stop()
+	require.NoError(t, err)
 }
 
 func iteratePairs(t *testing.T, iter iteration.Iterator, keyStart int, numPairs int) {
@@ -414,7 +423,7 @@ func writeKVsWithParams(t *testing.T, shakti *Shakti, keyStart int, numPairs int
 			Value: v,
 		})
 	}
-	err := shakti.Write(NewWriteBatch(1, -1, batch, func() {}))
+	err := shakti.Write(NewWriteBatch(1, -1, batch, func(error) error { return nil }))
 	require.NoError(t, err)
 }
 

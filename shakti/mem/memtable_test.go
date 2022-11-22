@@ -250,7 +250,7 @@ func testMTIteratorIterateInRange(t *testing.T, keyStart []byte, keyEnd []byte, 
 			Value: val,
 		})
 	}
-	ok, err := memTable.Write(batch, func() error {
+	ok, err := memTable.Write(batch, func(error) error {
 		return nil
 	})
 	require.NoError(t, err)
@@ -275,7 +275,7 @@ func addToMemtable(t *testing.T, memTable *Memtable, key string, value string) {
 		Key:   []byte(key),
 		Value: []byte(value),
 	})
-	ok, err := memTable.Write(batch, func() error {
+	ok, err := memTable.Write(batch, func(error) error {
 		return nil
 	})
 	require.NoError(t, err)
@@ -289,7 +289,7 @@ func addToMemtableWithByteSlice(t *testing.T, memTable *Memtable, key string, va
 		Key:   []byte(key),
 		Value: value,
 	})
-	ok, err := memTable.Write(batch, func() error {
+	ok, err := memTable.Write(batch, func(error) error {
 		return nil
 	})
 	require.NoError(t, err)

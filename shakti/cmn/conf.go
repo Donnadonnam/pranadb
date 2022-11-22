@@ -3,10 +3,11 @@ package cmn
 import "time"
 
 type Conf struct {
-	MemtableMaxSizeBytes      int
-	MemTableMaxReplaceTime    time.Duration
-	MemtableFlushQueueMaxSize int
-	TableFormat               DataFormat
+	MemtableMaxSizeBytes          int
+	MemTableMaxReplaceTime        time.Duration
+	MemtableFlushQueueMaxSize     int
+	TableFormat                   DataFormat
+	DisableBatchSequenceInsertion bool
 }
 
 type DataFormat byte

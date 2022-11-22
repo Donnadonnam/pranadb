@@ -24,7 +24,7 @@ func BenchmarkMemTableWrites(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		memTable := NewMemtable(arenaskl.NewArena(1024 * 1024))
-		ok, err := memTable.Write(batch, func() error {
+		ok, err := memTable.Write(batch, func(error) error {
 			return nil
 		})
 		require.NoError(b, err)

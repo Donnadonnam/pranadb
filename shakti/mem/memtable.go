@@ -96,7 +96,7 @@ func NewMemtable(arena *arenaskl.Arena) *Memtable {
 	return mt
 }
 
-func (m *Memtable) Write(batch *Batch, committedCallback func() error) (bool, error) {
+func (m *Memtable) Write(batch *Batch, committedCallback func(error) error) (bool, error) {
 
 	spaceRemaining := int(m.arena.Cap() - m.arena.Size())
 	var estimateMemSize int
@@ -131,7 +131,7 @@ func (m *Memtable) Write(batch *Batch, committedCallback func() error) (bool, er
 		}
 	}
 	m.first = false
-	m.committedCallbacks.Store(committedCallback(), struct{}{})
+	m.committedCallbacks.Store(&committedCallback, struct{}{})
 	return true, nil
 }
 
@@ -182,8 +182,9 @@ func (m *Memtable) Committed() error {
 	// The memtable has been successfully committed to storage we now call all committed callbacks
 	var err error
 	m.committedCallbacks.Range(func(key, _ interface{}) bool {
-		cb := key.(func() error) //nolint:forcetypeassert
-		if err = cb(); err != nil {
+		cb := key.(*(func(error) error)) //nolint:forcetypeassert
+		f := *cb
+		if err = f(nil); err != nil {
 			return false
 		}
 		return true

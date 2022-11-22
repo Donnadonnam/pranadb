@@ -2,6 +2,7 @@ package sst
 
 import (
 	"bytes"
+	"fmt"
 	"github.com/squareup/pranadb/common"
 	"github.com/squareup/pranadb/errors"
 	"github.com/squareup/pranadb/shakti/cmn"
@@ -55,7 +56,7 @@ func BuildSSTable(format cmn.DataFormat, buffSizeEstimate int, entriesEstimate i
 		kv := iter.Current()
 		// Sanity checks - can maybe remove them or activate them only with a flag for performance
 		if len(kv.Key) < lcp || bytes.Compare(commonPrefix, kv.Key[:lcp]) != 0 {
-			panic("key does not have common prefix")
+			panic(fmt.Sprintf("key does not have common prefix %s %s", string(kv.Key), string(commonPrefix)))
 		}
 		if prevKey != nil && bytes.Compare(prevKey, kv.Key) >= 0 {
 			panic("keys not in order / contains duplicates")
