@@ -2,6 +2,7 @@ package iteration
 
 import (
 	"bytes"
+	log "github.com/sirupsen/logrus"
 	"github.com/squareup/pranadb/shakti/cmn"
 )
 
@@ -17,6 +18,11 @@ func NewMergingIterator(iters []Iterator, preserveTombstones bool) (*MergingIter
 		iters:              iters,
 		preserveTombstones: preserveTombstones,
 	}
+	for _, iter := range iters {
+		if iter == nil {
+			log.Println("nil")
+		}
+	}
 	if err := mi.Next(); err != nil {
 		return nil, err
 	}
@@ -29,6 +35,11 @@ func (m *MergingIterator) PrependIterator(iter Iterator) error {
 	iters = append(iters, m.iters...)
 	m.iters = iters
 	_, err := m.IsValid()
+	for _, iter := range iters {
+		if iter == nil {
+			log.Println("nil")
+		}
+	}
 	return err
 }
 
@@ -68,6 +79,9 @@ func (m *MergingIterator) IsValid() (bool, error) {
 	for repeat {
 		var smallestKey []byte
 		for _, iter := range m.iters {
+			if iter == nil {
+				log.Println("**** iter is nil!!")
+			}
 			valid, err := iter.IsValid()
 			if err != nil {
 				return false, err

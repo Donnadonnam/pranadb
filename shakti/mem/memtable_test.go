@@ -2,10 +2,10 @@ package mem
 
 import (
 	"fmt"
-	"github.com/andy-kimball/arenaskl"
 	log "github.com/sirupsen/logrus"
 	"github.com/squareup/pranadb/errors"
 	pranalog "github.com/squareup/pranadb/log"
+	"github.com/squareup/pranadb/shakti/arenaskl"
 	"github.com/squareup/pranadb/shakti/cmn"
 	"github.com/squareup/pranadb/shakti/iteration"
 	"github.com/stretchr/testify/require"

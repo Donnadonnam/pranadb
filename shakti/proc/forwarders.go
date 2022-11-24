@@ -2,7 +2,7 @@ package proc
 
 import (
 	"github.com/squareup/pranadb/errors"
-	"github.com/squareup/pranadb/shakti"
+	"github.com/squareup/pranadb/shakti/store"
 	"sync"
 )
 
@@ -10,7 +10,7 @@ import (
 // other processor, and then be successfully replicated to replicas, and a response received from the other processor
 // will the Committed() callback be called
 type RemoteForwarder interface {
-	EnqueueRemotely(processorID uint64, batch *shakti.WriteBatch) error
+	EnqueueRemotely(processorID uint64, batch *store.WriteBatch) error
 }
 
 // LocalForwarder is used in testing
@@ -18,7 +18,7 @@ type LocalForwarder struct {
 	processors sync.Map
 }
 
-func (lf *LocalForwarder) EnqueueRemotely(processorID uint64, batch *shakti.WriteBatch) error {
+func (lf *LocalForwarder) EnqueueRemotely(processorID uint64, batch *store.WriteBatch) error {
 	p, ok := lf.processors.Load(processorID)
 	if !ok {
 		return errors.Errorf("cannot find processor %d", processorID)

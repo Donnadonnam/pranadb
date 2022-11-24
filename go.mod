@@ -11,7 +11,6 @@ require (
 	github.com/alecthomas/kong-hcl/v2 v2.0.0-20210826214724-5e9bf8bff126
 	github.com/alecthomas/participle/v2 v2.0.0-alpha6
 	github.com/alecthomas/repr v0.0.0-20210611225437-1a2716eca9d6
-	github.com/andy-kimball/arenaskl v0.0.0-20200617143215-f701008588b9
 	github.com/bserdar/golang-lru v0.0.0-20190506053902-559c5d14b56e
 	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
 	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e

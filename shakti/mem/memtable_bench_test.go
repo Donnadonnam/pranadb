@@ -2,7 +2,7 @@ package mem
 
 import (
 	"fmt"
-	"github.com/andy-kimball/arenaskl"
+	"github.com/squareup/pranadb/shakti/arenaskl"
 	"github.com/squareup/pranadb/shakti/cmn"
 	"github.com/stretchr/testify/require"
 	"math/rand"

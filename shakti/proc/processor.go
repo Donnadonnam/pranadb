@@ -3,8 +3,8 @@ package proc
 import (
 	log "github.com/sirupsen/logrus"
 	"github.com/squareup/pranadb/common"
-	"github.com/squareup/pranadb/shakti"
 	"github.com/squareup/pranadb/shakti/mem"
+	"github.com/squareup/pranadb/shakti/store"
 	"sync"
 	"sync/atomic"
 )
@@ -23,13 +23,13 @@ type Processor struct {
 	remoteForwarder    RemoteForwarder
 	stopWg             sync.WaitGroup
 	batchSequence      int64
-	shakti             *shakti.Shakti
+	shakti             *store.Shakti
 	queueLock          common.SpinLock
 	lastCommittedBatch int64
 }
 
 func NewProcessor(id uint64, maxQueueSize int, batchHandler BatchHandler, replicator Replicator,
-	remoteForwarder RemoteForwarder, shakti *shakti.Shakti) *Processor {
+	remoteForwarder RemoteForwarder, shakti *store.Shakti) *Processor {
 	return &Processor{
 		id:                 id,
 		maxQueueSize:       maxQueueSize,
@@ -180,13 +180,13 @@ func (p *Processor) processBatch(sequenceNumber int64, batch *mem.Batch, complet
 	// be committed on this node. All this is done asynchronously
 	// When all of that is done the completionFunc will be called
 	for processorID, remoteBatch := range remoteBatches {
-		writeBatch := shakti.NewWriteBatch(processorID, fut.sequenceNum, remoteBatch, fut.countDown)
+		writeBatch := store.NewWriteBatch(processorID, fut.sequenceNum, remoteBatch, fut.countDown)
 		if err := p.remoteForwarder.EnqueueRemotely(processorID, writeBatch); err != nil {
 			return err
 		}
 	}
 	if localBatch != nil {
-		writeBatch := shakti.NewWriteBatch(p.id, sequenceNumber, localBatch, fut.countDown)
+		writeBatch := store.NewWriteBatch(p.id, sequenceNumber, localBatch, fut.countDown)
 		if err := p.shakti.Write(writeBatch); err != nil {
 			return err
 		}

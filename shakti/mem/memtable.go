@@ -2,8 +2,9 @@ package mem
 
 import (
 	"bytes"
-	"github.com/andy-kimball/arenaskl"
+	log "github.com/sirupsen/logrus"
 	"github.com/squareup/pranadb/common"
+	"github.com/squareup/pranadb/shakti/arenaskl"
 	"github.com/squareup/pranadb/shakti/cmn"
 	"github.com/squareup/pranadb/shakti/iteration"
 	"sync"
@@ -104,8 +105,9 @@ func (m *Memtable) Write(batch *Batch, committedCallback func(error) error) (boo
 		// The first entry allocates a bunch of stuff in the skiplist so is higher
 		estimateMemSize = initialOverhead
 	}
-	estimateMemSize += len(batch.entries)*avgOverHeadPerEntry + 8 // 8 byte fudge factor to reduce likelihood of arena full
+	estimateMemSize += len(batch.entries)*avgOverHeadPerEntry + 32 // 32 byte fudge factor to reduce likelihood of arena full
 	estimateMemSize += batch.totKVSize
+	log.Debugf("estimate size %d remaining %d", estimateMemSize, spaceRemaining)
 	if spaceRemaining < estimateMemSize {
 		// No room in the memtable
 		return false, nil

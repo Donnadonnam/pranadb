@@ -1,4 +1,4 @@
-package shakti
+package store
 
 import (
 	"fmt"
@@ -26,7 +26,7 @@ func init() {
 }
 
 func TestSimpleIterate(t *testing.T) {
-	shakti := setupShakti(t)
+	shakti := SetupShakti(t)
 
 	iter, err := shakti.NewIterator(nil, nil)
 	require.NoError(t, err)
@@ -41,7 +41,7 @@ func TestSimpleIterate(t *testing.T) {
 }
 
 func TestIterateAllThenAddMore(t *testing.T) {
-	shakti := setupShakti(t)
+	shakti := SetupShakti(t)
 
 	iter, err := shakti.NewIterator(nil, nil)
 	require.NoError(t, err)
@@ -59,7 +59,7 @@ func TestIterateAllThenAddMore(t *testing.T) {
 }
 
 func TestIterateInRange(t *testing.T) {
-	shakti := setupShakti(t)
+	shakti := SetupShakti(t)
 
 	ks := []byte(fmt.Sprintf("prefix/key-%010d", 3))
 	ke := []byte(fmt.Sprintf("prefix/key-%010d", 7))
@@ -77,7 +77,7 @@ func TestIterateInRange(t *testing.T) {
 }
 
 func TestIterateInRangeNoEndRange(t *testing.T) {
-	shakti := setupShakti(t)
+	shakti := SetupShakti(t)
 
 	ks := []byte(fmt.Sprintf("prefix/key-%010d", 3))
 
@@ -94,7 +94,7 @@ func TestIterateInRangeNoEndRange(t *testing.T) {
 }
 
 func TestIterateThenDelete(t *testing.T) {
-	shakti := setupShakti(t)
+	shakti := SetupShakti(t)
 
 	iter, err := shakti.NewIterator(nil, nil)
 	require.NoError(t, err)
@@ -114,7 +114,7 @@ func TestIterateThenDelete(t *testing.T) {
 }
 
 func TestIterateThenReplaceThenDelete(t *testing.T) {
-	shakti := setupShakti(t)
+	shakti := SetupShakti(t)
 
 	iter, err := shakti.NewIterator(nil, nil)
 	require.NoError(t, err)
@@ -136,7 +136,7 @@ func TestIterateThenReplaceThenDelete(t *testing.T) {
 }
 
 func TestIterateAllMemtableThenReplace(t *testing.T) {
-	shakti := setupShakti(t)
+	shakti := SetupShakti(t)
 	defer shakti.Stop()
 
 	iter, err := shakti.NewIterator(nil, nil)
@@ -159,14 +159,8 @@ func TestIterateAllMemtableThenReplace(t *testing.T) {
 	}
 }
 
-func TestIterateSomeMemtableThenReplace2(t *testing.T) {
-	for i := 0; i < 1000; i++ {
-		TestIterateSomeMemtableThenReplace(t)
-	}
-}
-
 func TestIterateSomeMemtableThenReplace(t *testing.T) {
-	shakti := setupShakti(t)
+	shakti := SetupShakti(t)
 	defer stopShakti(t, shakti)
 
 	iter, err := shakti.NewIterator(nil, nil)
@@ -201,7 +195,7 @@ func TestIterateSomeMemtableThenReplace(t *testing.T) {
 }
 
 func TestIterateThenReplaceThenAddWithSmallerKey(t *testing.T) {
-	shakti := setupShakti(t)
+	shakti := SetupShakti(t)
 
 	iter, err := shakti.NewIterator(nil, nil)
 	require.NoError(t, err)
@@ -232,7 +226,7 @@ func TestIterateThenReplaceThenAddWithSmallerKey(t *testing.T) {
 }
 
 func TestIterateShuffledKeys(t *testing.T) {
-	shakti := setupShakti(t)
+	shakti := SetupShakti(t)
 
 	// Add a bunch of entries in random order, and add in small batches, replacing memtable each time
 	// Then iterate through them and verify in order and all correct
@@ -249,7 +243,7 @@ func TestIterateShuffledKeys(t *testing.T) {
 			batch = mem.NewBatch()
 		}
 		batch.AddEntry(cmn.KV{
-			Key:   entry.keyEnd,
+			Key:   entry.keyStart,
 			Value: entry.keyEnd,
 		})
 		if batch.Size() == batchSize {
@@ -273,12 +267,15 @@ func TestPeriodicMemtableReplace(t *testing.T) {
 	// Make sure that the memtable is periodically replaced
 	maxReplaceTime := 250 * time.Millisecond
 	conf := cmn.Conf{
-		MemtableMaxSizeBytes:      1024 * 1024,
-		MemtableFlushQueueMaxSize: 4,
-		TableFormat:               cmn.DataFormatV1,
-		MemTableMaxReplaceTime:    maxReplaceTime,
+		MemtableMaxSizeBytes:          1024 * 1024,
+		MemtableFlushQueueMaxSize:     4,
+		TableFormat:                   cmn.DataFormatV1,
+		MemTableMaxReplaceTime:        maxReplaceTime,
+		DisableBatchSequenceInsertion: true,
 	}
-	shakti := setupShaktiWithConf(t, conf)
+	shakti := SetupShaktiWithConf(t, conf)
+	defer stopShakti(t, shakti)
+
 	cs := shakti.cloudStore.(*cloudstore.LocalStore) //nolint:forcetypeassert
 
 	numIters := 3
@@ -289,12 +286,15 @@ func TestPeriodicMemtableReplace(t *testing.T) {
 
 		writeKVs(t, shakti, ks, 10)
 
+		log.Debugf("store size is currently %d", storeSize)
+
 		commontest.WaitUntil(t, func() (bool, error) {
 			// Wait until the SSTable should has been pushed to the cloud store
 			return cs.Size() == storeSize+1, nil
 		})
 
 		// Make sure all the data is there
+		log.Debug("creating iterator....")
 		iter, err := shakti.NewIterator(nil, nil)
 		require.NoError(t, err)
 		iteratePairs(t, iter, 0, 10*(i+1))
@@ -314,7 +314,9 @@ func TestMemtableReplaceWhenMaxSizeReached(t *testing.T) {
 		TableFormat:               cmn.DataFormatV1,
 		MemTableMaxReplaceTime:    30 * time.Second,
 	}
-	shakti := setupShaktiWithConf(t, conf)
+	shakti := SetupShaktiWithConf(t, conf)
+	defer stopShakti(t, shakti)
+
 	cs := shakti.cloudStore.(*cloudstore.LocalStore) //nolint:forcetypeassert
 
 	// Add entries until several SSTables have been flushed to cloud store
@@ -332,7 +334,7 @@ func TestMemtableReplaceWhenMaxSizeReached(t *testing.T) {
 	//iteratePairs(t, iter, 0, ks)
 }
 
-func setupShakti(t *testing.T) *Shakti {
+func SetupShakti(t *testing.T) *Shakti {
 	t.Helper()
 	conf := cmn.Conf{
 		MemtableMaxSizeBytes:          1024 * 1024,
@@ -341,10 +343,10 @@ func setupShakti(t *testing.T) *Shakti {
 		MemTableMaxReplaceTime:        30 * time.Second,
 		DisableBatchSequenceInsertion: true,
 	}
-	return setupShaktiWithConf(t, conf)
+	return SetupShaktiWithConf(t, conf)
 }
 
-func setupShaktiWithConf(t *testing.T, conf cmn.Conf) *Shakti {
+func SetupShaktiWithConf(t *testing.T, conf cmn.Conf) *Shakti {
 	t.Helper()
 	controllerConf := datacontroller.Conf{
 		RegistryFormat:                 cmn.MetadataFormatV1,
@@ -375,7 +377,7 @@ func iteratePairs(t *testing.T, iter iteration.Iterator, keyStart int, numPairs 
 	for i := 0; i < numPairs; i++ {
 		requireIterValid(t, iter, true)
 		curr := iter.Current()
-		//log.Printf("got key %s value %s", string(curr.Key), string(curr.Value))
+		log.Printf("got key %s value %s", string(curr.Key), string(curr.Value))
 		require.Equal(t, []byte(fmt.Sprintf("prefix/key-%010d", keyStart+i)), curr.Key)
 		require.Equal(t, []byte(fmt.Sprintf("prefix/value-%010d", keyStart+i)), curr.Value)
 		if i != numPairs-1 {
